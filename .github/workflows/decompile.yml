@@ -35,6 +35,7 @@ jobs:
           }
 
           Write-Host "Extracting: $($zip.Name)"
+
           Expand-Archive -LiteralPath $zip.FullName `
             -DestinationPath "$env:RUNNER_TEMP/game" -Force
 
@@ -159,6 +160,24 @@ jobs:
 
           Expand-Archive -LiteralPath "$env:RUNNER_TEMP/dumper.zip" `
             -DestinationPath "$env:RUNNER_TEMP/dumper" -Force
+
+      - name: Install .NET 6 Runtime
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+          dotnet-quality: 'ga'
+
+      - name: Verify .NET installation
+        shell: pwsh
+        run: |
+          dotnet --list-runtimes
+
+          $runtime = dotnet --list-runtimes |
+            Select-String "Microsoft.NETCore.App 6\.0"
+
+          if (!$runtime) {
+            throw ".NET 6 Runtime installation failed"
+          }
 
       - name: Analyze IL2CPP
         shell: pwsh
