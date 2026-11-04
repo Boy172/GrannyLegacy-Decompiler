@@ -21,83 +21,114 @@ jobs:
       - name: Prepare directories
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force input, output, tools
+          New-Item -ItemType Directory -Force input, output, tools | Out-Null
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/game" | Out-Null
 
       - name: Extract game ZIP
         shell: pwsh
         run: |
-          $zip = Get-ChildItem input -Filter *.zip | Select-Object -First 1
+          $zip = Get-ChildItem -LiteralPath "input" -File -Filter "*.zip" |
+            Select-Object -First 1
 
           if (!$zip) {
             throw "No game ZIP found in input/"
           }
 
-          Expand-Archive $zip.FullName "$env:RUNNER_TEMP/game" -Force
+          Write-Host "Extracting: $($zip.Name)"
+          Expand-Archive -LiteralPath $zip.FullName `
+            -DestinationPath "$env:RUNNER_TEMP/game" -Force
 
       - name: Locate Unity files
         shell: pwsh
         run: |
           $root = "$env:RUNNER_TEMP/game"
 
-          $assembly = Get-ChildItem $root -Recurse -Filter GameAssembly.dll |
+          Write-Host "Searching extracted files..."
+
+          $assembly = Get-ChildItem -LiteralPath $root -Recurse -File -Filter "GameAssembly.dll" |
             Select-Object -First 1
 
-          $metadata = Get-ChildItem $root -Recurse -Filter global-metadata.dat |
+          $metadata = Get-ChildItem -LiteralPath $root -Recurse -File -Filter "global-metadata.dat" |
             Select-Object -First 1
 
-          if (!$assembly -or !$metadata) {
-            throw "Unity IL2CPP files not found"
+          if (!$assembly) {
+            throw "GameAssembly.dll not found"
+          }
+
+          if (!$metadata) {
+            throw "global-metadata.dat not found"
+          }
+
+          $gameData = Get-ChildItem -LiteralPath $root -Recurse -Directory |
+            Where-Object { $_.Name -like "*_Data" } |
+            Select-Object -First 1
+
+          if (!$gameData) {
+            $marker = Get-ChildItem -LiteralPath $root -Recurse -File -Filter "globalgamemanagers" |
+              Select-Object -First 1
+
+            if ($marker) {
+              $gameData = $marker.Directory
+            }
+          }
+
+          if (!$gameData) {
+            Write-Host "Extracted directory structure:"
+            Get-ChildItem -LiteralPath $root -Recurse -Depth 4 |
+              Select-Object FullName |
+              Format-Table -AutoSize
+
+            throw "Unity Data folder not found"
           }
 
           "ASSEMBLY=$($assembly.FullName)" >> $env:GITHUB_ENV
           "METADATA=$($metadata.FullName)" >> $env:GITHUB_ENV
-
-          $gameData = Get-ChildItem $root -Directory -Filter '*_Data' |
-            Select-Object -First 1
-
-          if (!$gameData) {
-            throw "Unity Data folder not found"
-          }
-
           "GAMEDATA=$($gameData.FullName)" >> $env:GITHUB_ENV
+
+          Write-Host "GameAssembly: $($assembly.FullName)"
+          Write-Host "Metadata: $($metadata.FullName)"
+          Write-Host "Game Data: $($gameData.FullName)"
 
       - name: Download AssetRipper
         shell: pwsh
         run: |
           $release = Invoke-RestMethod `
-            https://api.github.com/repos/AssetRipper/AssetRipper/releases/latest
+            -Uri "https://api.github.com/repos/AssetRipper/AssetRipper/releases/latest"
 
           $asset = $release.assets |
-            Where-Object { $_.name -match 'win.*x64.*\.zip$' } |
+            Where-Object { $_.name -match "win.*x64.*\.zip$" } |
             Select-Object -First 1
 
           if (!$asset) {
             $asset = $release.assets |
-              Where-Object { $_.name -match '\.zip$' } |
+              Where-Object { $_.name -match "\.zip$" } |
               Select-Object -First 1
           }
 
           if (!$asset) {
-            throw "AssetRipper Windows archive not found"
+            throw "AssetRipper archive not found"
           }
 
-          Invoke-WebRequest $asset.browser_download_url `
+          Invoke-WebRequest -Uri $asset.browser_download_url `
             -OutFile "$env:RUNNER_TEMP/assetripper.zip"
 
-          Expand-Archive "$env:RUNNER_TEMP/assetripper.zip" `
-            "$env:RUNNER_TEMP/assetripper" -Force
+          Expand-Archive -LiteralPath "$env:RUNNER_TEMP/assetripper.zip" `
+            -DestinationPath "$env:RUNNER_TEMP/assetripper" -Force
 
       - name: Export Unity project
         shell: pwsh
         run: |
-          $tool = Get-ChildItem "$env:RUNNER_TEMP/assetripper" `
-            -Recurse -Filter *.exe |
-            Where-Object { $_.Name -match 'AssetRipper' } |
+          $tool = Get-ChildItem -LiteralPath "$env:RUNNER_TEMP/assetripper" `
+            -Recurse -File -Filter "*.exe" |
+            Where-Object { $_.Name -match "AssetRipper" } |
             Select-Object -First 1
 
           if (!$tool) {
             throw "AssetRipper executable not found"
           }
+
+          New-Item -ItemType Directory -Force `
+            "$env:GITHUB_WORKSPACE/output/UnityProject" | Out-Null
 
           & $tool.FullName --cli `
             -i "$env:GAMEDATA" `
@@ -106,39 +137,42 @@ jobs:
             --script-content-level Level0
 
           if ($LASTEXITCODE -ne 0) {
-            throw "AssetRipper failed"
+            throw "AssetRipper failed with exit code $LASTEXITCODE"
           }
 
       - name: Download Il2CppDumper
         shell: pwsh
         run: |
           $release = Invoke-RestMethod `
-            https://api.github.com/repos/Perfare/Il2CppDumper/releases/latest
+            -Uri "https://api.github.com/repos/Perfare/Il2CppDumper/releases/latest"
 
           $asset = $release.assets |
-            Where-Object { $_.name -match '\.zip$' } |
+            Where-Object { $_.name -match "\.zip$" } |
             Select-Object -First 1
 
           if (!$asset) {
             throw "Il2CppDumper archive not found"
           }
 
-          Invoke-WebRequest $asset.browser_download_url `
+          Invoke-WebRequest -Uri $asset.browser_download_url `
             -OutFile "$env:RUNNER_TEMP/dumper.zip"
 
-          Expand-Archive "$env:RUNNER_TEMP/dumper.zip" `
-            "$env:RUNNER_TEMP/dumper" -Force
+          Expand-Archive -LiteralPath "$env:RUNNER_TEMP/dumper.zip" `
+            -DestinationPath "$env:RUNNER_TEMP/dumper" -Force
 
       - name: Analyze IL2CPP
         shell: pwsh
         run: |
-          $tool = Get-ChildItem "$env:RUNNER_TEMP/dumper" `
-            -Recurse -Filter Il2CppDumper.exe |
+          $tool = Get-ChildItem -LiteralPath "$env:RUNNER_TEMP/dumper" `
+            -Recurse -File -Filter "Il2CppDumper.exe" |
             Select-Object -First 1
 
           if (!$tool) {
             throw "Il2CppDumper executable not found"
           }
+
+          New-Item -ItemType Directory -Force `
+            "$env:GITHUB_WORKSPACE/output/IL2CPP" | Out-Null
 
           & $tool.FullName `
             "$env:ASSEMBLY" `
@@ -146,7 +180,7 @@ jobs:
             "$env:GITHUB_WORKSPACE/output/IL2CPP"
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Il2CppDumper failed"
+            throw "Il2CppDumper failed with exit code $LASTEXITCODE"
           }
 
       - name: Save extracted files
