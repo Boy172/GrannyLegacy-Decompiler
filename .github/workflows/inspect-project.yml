@@ -1,0 +1,90 @@
+
+name: Inspect Decompiled Unity Project
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Download Decompiled Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: GrannyLegacy-Decompiled
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Boy172/GrannyLegacy-Decompiler
+          run-id: 41898969580
+          path: extracted
+
+      - name: Inspect Unity Project
+        shell: pwsh
+        run: |
+          $root = "$env:GITHUB_WORKSPACE/extracted"
+          $report = "$env:GITHUB_WORKSPACE/project-report.txt"
+
+          "GRANNY LEGACY - PROJECT INSPECTION" | Out-File $report
+          "" | Out-File $report -Append
+
+          Write-Host "Revisando archivos..."
+          $files = @(Get-ChildItem $root -File -Recurse)
+          $folders = @(Get-ChildItem $root -Directory -Recurse)
+
+          "Total de archivos: $($files.Count)" | Out-File $report -Append
+          "Total de carpetas: $($folders.Count)" | Out-File $report -Append
+
+          $size = ($files | Measure-Object Length -Sum).Sum
+          "Tamaño total: $([math]::Round($size / 1GB, 2)) GB" | Out-File $report -Append
+
+          "`nCARPETAS PRINCIPALES:" | Out-File $report -Append
+          Get-ChildItem $root -Directory | ForEach-Object {
+            $_.FullName | Out-File $report -Append
+          }
+
+          "`nARCHIVOS IMPORTANTES:" | Out-File $report -Append
+
+          $patterns = @(
+            "ProjectVersion.txt",
+            "manifest.json",
+            "globalgamemanagers",
+            "GameAssembly.dll",
+            "global-metadata.dat"
+          )
+
+          foreach ($pattern in $patterns) {
+            $found = Get-ChildItem $root -Filter $pattern -File -Recurse -ErrorAction SilentlyContinue
+            foreach ($item in $found) {
+              $item.FullName | Out-File $report -Append
+            }
+          }
+
+          "`nCARPETAS UNITY:" | Out-File $report -Append
+
+          foreach ($name in @("Assets", "ProjectSettings", "Packages")) {
+            $found = Get-ChildItem $root -Directory -Recurse |
+              Where-Object { $_.Name -eq $name }
+
+            foreach ($item in $found) {
+              $item.FullName | Out-File $report -Append
+            }
+          }
+
+          Write-Host "Inspección terminada."
+          Get-Content $report
+
+          "Inspección terminada." >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload Inspection Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GrannyLegacy-Project-Report
+          path: project-report.txt
+          if-no-files-found: warn
+          retention-days: 7
