@@ -1,0 +1,111 @@
+
+name: Granny Plus - Build Android APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    name: Build Granny Plus APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Prepare workspace
+        run: |
+          mkdir -p extracted build
+
+      - name: Download Decompiled Project
+        uses: actions/download-artifact@v4
+        with:
+          name: GrannyLegacy-Decompiled
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Boy172/GrannyLegacy-Decompiler
+          run-id: 41898969580
+          path: extracted
+
+      - name: Verify Unity Project
+        shell: bash
+        run: |
+          PROJECT="extracted/UnityProject/ExportedProject"
+
+          if [ ! -d "$PROJECT/Assets" ]; then
+            echo "::error::No se encontró Assets."
+            exit 1
+          fi
+
+          if [ ! -d "$PROJECT/ProjectSettings" ]; then
+            echo "::error::No se encontró ProjectSettings."
+            exit 1
+          fi
+
+          if [ ! -f "$PROJECT/ProjectSettings/ProjectVersion.txt" ]; then
+            echo "::error::No se encontró ProjectVersion.txt."
+            exit 1
+          fi
+
+          echo "Proyecto Unity encontrado."
+          cat "$PROJECT/ProjectSettings/ProjectVersion.txt"
+
+      - name: Check Unity License
+        shell: bash
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+        run: |
+          if [ -z "$UNITY_LICENSE" ]; then
+            echo "::error::Falta configurar UNITY_LICENSE en GitHub Secrets."
+            exit 1
+          fi
+
+          echo "Se encontró la configuración de licencia."
+
+      - name: Build Android APK
+        uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          projectPath: extracted/UnityProject/ExportedProject
+          unityVersion: 2022.3.62f2
+          targetPlatform: Android
+          buildsPath: build
+          buildName: GrannyPlus
+          androidExportType: androidPackage
+          androidSymbolType: none
+
+      - name: Find APK
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p output
+
+          find build -type f -name "*.apk" -exec cp {} output/ \;
+
+          echo "APK encontrados:"
+          find output -type f -name "*.apk"
+
+      - name: Upload Android APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GrannyPlus-Android-APK
+          path: output/*.apk
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload Unity Build Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GrannyPlus-Build-Logs
+          path: |
+            build/
+            extracted/UnityProject/ExportedProject/Logs/
+          if-no-files-found: ignore
+          retention-days: 7
