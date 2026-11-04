@@ -11,7 +11,7 @@ permissions:
 jobs:
   inspect:
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
       - name: Download Decompiled Artifact
@@ -23,16 +23,20 @@ jobs:
           run-id: 41898969580
           path: extracted
 
-      - name: Inspect Unity Project
+      - name: Inspect Unity Configuration
         shell: pwsh
         run: |
-          $root = "$env:GITHUB_WORKSPACE/extracted"
+          $root = "$env:GITHUB_WORKSPACE/extracted/UnityProject/ExportedProject"
           $report = "$env:GITHUB_WORKSPACE/project-report.txt"
 
-          "GRANNY LEGACY - PROJECT INSPECTION" | Out-File $report
-          "" | Out-File $report -Append
+          if (-not (Test-Path $root)) {
+            throw "No se encontró el proyecto Unity: $root"
+          }
 
-          Write-Host "Revisando archivos..."
+          "GRANNY LEGACY - UNITY PROJECT REPORT" | Out-File $report
+
+          "`n========== PROJECT STRUCTURE ==========" | Out-File $report -Append
+
           $files = @(Get-ChildItem $root -File -Recurse)
           $folders = @(Get-ChildItem $root -Directory -Recurse)
 
@@ -40,45 +44,105 @@ jobs:
           "Total de carpetas: $($folders.Count)" | Out-File $report -Append
 
           $size = ($files | Measure-Object Length -Sum).Sum
-          "Tamaño total: $([math]::Round($size / 1GB, 2)) GB" | Out-File $report -Append
+          "Tamaño: $([math]::Round($size / 1GB, 2)) GB" | Out-File $report -Append
 
-          "`nCARPETAS PRINCIPALES:" | Out-File $report -Append
-          Get-ChildItem $root -Directory | ForEach-Object {
-            $_.FullName | Out-File $report -Append
+          "`n========== UNITY VERSION ==========" | Out-File $report -Append
+
+          $versionFile = "$root/ProjectSettings/ProjectVersion.txt"
+
+          if (Test-Path $versionFile) {
+            Get-Content $versionFile | Out-File $report -Append
+          } else {
+            "ProjectVersion.txt no encontrado" | Out-File $report -Append
           }
 
-          "`nARCHIVOS IMPORTANTES:" | Out-File $report -Append
+          "`n========== PACKAGE MANIFEST ==========" | Out-File $report -Append
 
-          $patterns = @(
-            "ProjectVersion.txt",
-            "manifest.json",
-            "globalgamemanagers",
-            "GameAssembly.dll",
-            "global-metadata.dat"
+          $manifestFile = "$root/Packages/manifest.json"
+
+          if (Test-Path $manifestFile) {
+            Get-Content $manifestFile | Out-File $report -Append
+          } else {
+            "manifest.json no encontrado" | Out-File $report -Append
+          }
+
+          "`n========== BUILD SETTINGS ==========" | Out-File $report -Append
+
+          $scenesFile = "$root/ProjectSettings/EditorBuildSettings.asset"
+
+          if (Test-Path $scenesFile) {
+            Get-Content $scenesFile | Out-File $report -Append
+          } else {
+            "EditorBuildSettings.asset no encontrado" | Out-File $report -Append
+          }
+
+          "`n========== ASSET COUNTS ==========" | Out-File $report -Append
+
+          $extensions = @(
+            "*.unity",
+            "*.cs",
+            "*.asmdef",
+            "*.prefab",
+            "*.asset",
+            "*.mat",
+            "*.shader",
+            "*.controller",
+            "*.meta"
           )
 
-          foreach ($pattern in $patterns) {
-            $found = Get-ChildItem $root -Filter $pattern -File -Recurse -ErrorAction SilentlyContinue
+          foreach ($ext in $extensions) {
+            $count = @(Get-ChildItem "$root/Assets" -Filter $ext -File -Recurse -ErrorAction SilentlyContinue).Count
+            "$ext : $count" | Out-File $report -Append
+          }
+
+          "`n========== TOP LEVEL FOLDERS ==========" | Out-File $report -Append
+
+          Get-ChildItem "$root/Assets" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              $_.Name | Out-File $report -Append
+            }
+
+          "`n========== PROJECT SETTINGS FILES ==========" | Out-File $report -Append
+
+          Get-ChildItem "$root/ProjectSettings" -File -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              "$($_.Name) - $($_.Length) bytes" | Out-File $report -Append
+            }
+
+          "`n========== IL2CPP DUMP ==========" | Out-File $report -Append
+
+          $il2cpp = "$env:GITHUB_WORKSPACE/extracted/IL2CPP"
+
+          if (Test-Path $il2cpp) {
+            Get-ChildItem $il2cpp -File -Recurse |
+              ForEach-Object {
+                "$($_.FullName.Replace($il2cpp, 'IL2CPP')) - $($_.Length) bytes" |
+                  Out-File $report -Append
+              }
+          }
+
+          "`n========== IMPORTANT FILES ==========" | Out-File $report -Append
+
+          $important = @(
+            "globalgamemanagers",
+            "global-metadata.dat",
+            "GameAssembly.dll",
+            "boot.config"
+          )
+
+          foreach ($name in $important) {
+            $found = Get-ChildItem $env:GITHUB_WORKSPACE/extracted -Filter $name -File -Recurse -ErrorAction SilentlyContinue
+
             foreach ($item in $found) {
               $item.FullName | Out-File $report -Append
             }
           }
 
-          "`nCARPETAS UNITY:" | Out-File $report -Append
+          Write-Host "======================================"
+          Write-Host "INSPECCION COMPLETADA"
+          Write-Host "======================================"
 
-          foreach ($name in @("Assets", "ProjectSettings", "Packages")) {
-            $found = Get-ChildItem $root -Directory -Recurse |
-              Where-Object { $_.Name -eq $name }
-
-            foreach ($item in $found) {
-              $item.FullName | Out-File $report -Append
-            }
-          }
-
-          Write-Host "Inspección terminada."
           Get-Content $report
-
-          "Inspección terminada." >> $env:GITHUB_STEP_SUMMARY
 
       - name: Upload Inspection Report
         if: always()
