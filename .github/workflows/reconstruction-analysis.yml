@@ -1,0 +1,231 @@
+
+name: Granny Plus - Reconstruction Analysis
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    name: Analyze Decompiled Game
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Download Decompiled Project
+        uses: actions/download-artifact@v4
+        with:
+          name: GrannyLegacy-Decompiled
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: Boy172/GrannyLegacy-Decompiler
+          run-id: 41898969580
+          path: extracted
+
+      - name: Analyze Game Files
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re
+          import json
+          from pathlib import Path
+          from collections import Counter
+
+          root = Path("extracted")
+          project = root / "UnityProject" / "ExportedProject"
+          assets = project / "Assets"
+          il2cpp = root / "IL2CPP"
+
+          report = []
+
+          def section(title):
+              report.append("")
+              report.append("=" * 65)
+              report.append(title)
+              report.append("=" * 65)
+
+          def add(value=""):
+              report.append(str(value))
+
+          add("GRANNY PLUS - RECONSTRUCTION ANALYSIS")
+
+          section("UNITY VERSION")
+
+          version = project / "ProjectSettings" / "ProjectVersion.txt"
+
+          if version.exists():
+              add(version.read_text(errors="replace"))
+
+          section("IL2CPP DUMP")
+
+          dump = il2cpp / "dump.cs"
+
+          if dump.exists():
+              content = dump.read_text(errors="replace")
+              lines = content.splitlines()
+
+              add(f"Dump size: {dump.stat().st_size} bytes")
+              add(f"Total lines: {len(lines)}")
+
+              type_pattern = re.compile(
+                  r'^\s*(?:(?:public|private|protected|internal|abstract|sealed|static|partial|readonly|unsafe)\s+)*(?:class|struct|enum|interface)\s+([A-Za-z_]\w*)'
+              )
+
+              types = []
+
+              for line in lines:
+                  match = type_pattern.search(line)
+                  if match:
+                      types.append(line.strip())
+
+              add(f"Detected types: {len(types)}")
+              add("")
+              add("TYPE DECLARATIONS:")
+
+              for item in types[:1500]:
+                  add(item)
+
+              method_lines = [
+                  line.strip()
+                  for line in lines
+                  if "// RVA:" in line
+              ]
+
+              add("")
+              add(f"Methods with RVA: {len(method_lines)}")
+              add("METHOD ADDRESS INDEX:")
+
+              for item in method_lines[:2000]:
+                  add(item)
+
+              signatures = []
+
+              for i, line in enumerate(lines):
+                  if "// RVA:" in line:
+                      for following in lines[i + 1:i + 5]:
+                          stripped = following.strip()
+                          if stripped and "(" in stripped:
+                              signatures.append(stripped)
+                              break
+
+              add("")
+              add(f"Method signatures detected: {len(signatures)}")
+              add("METHOD SIGNATURES:")
+
+              for item in signatures[:2000]:
+                  add(item)
+
+          else:
+              add("dump.cs NOT FOUND")
+
+          section("EXPORTED C# SCRIPTS")
+
+          scripts = []
+
+          if assets.exists():
+              scripts = list(assets.rglob("*.cs"))
+
+          add(f"Total C# files: {len(scripts)}")
+
+          for script in scripts[:1000]:
+              add(str(script.relative_to(assets)))
+
+          section("UNITY SCENES")
+
+          scenes = list(assets.rglob("*.unity")) if assets.exists() else []
+
+          add(f"Total scenes: {len(scenes)}")
+
+          for scene in scenes:
+              add(str(scene.relative_to(assets)))
+
+          section("PREFABS")
+
+          prefabs = list(assets.rglob("*.prefab")) if assets.exists() else []
+
+          add(f"Total prefabs: {len(prefabs)}")
+
+          for prefab in prefabs[:500]:
+              add(str(prefab.relative_to(assets)))
+
+          section("ASSET INVENTORY")
+
+          if assets.exists():
+              extensions = Counter(
+                  file.suffix.lower() or "[no extension]"
+                  for file in assets.rglob("*")
+                  if file.is_file()
+              )
+
+              for extension, count in extensions.most_common():
+                  add(f"{extension}: {count}")
+
+          section("STRING LITERALS")
+
+          strings_file = il2cpp / "stringliteral.json"
+
+          if strings_file.exists():
+              try:
+                  data = json.loads(
+                      strings_file.read_text(errors="replace")
+                  )
+
+                  found = []
+
+                  def collect(obj):
+                      if isinstance(obj, str):
+                          if len(obj.strip()) >= 3:
+                              found.append(obj)
+                      elif isinstance(obj, dict):
+                          for value in obj.values():
+                              collect(value)
+                      elif isinstance(obj, list):
+                          for value in obj:
+                              collect(value)
+
+                  collect(data)
+
+                  add(f"String entries found: {len(found)}")
+
+                  for value in found[:500]:
+                      add(value)
+
+              except Exception as error:
+                  add(f"Could not parse stringliteral.json: {error}")
+
+          else:
+              add("stringliteral.json NOT FOUND")
+
+          section("IMPORTANT PROJECT FILES")
+
+          for relative in [
+              "ProjectSettings/ProjectVersion.txt",
+              "ProjectSettings/EditorBuildSettings.asset",
+              "Packages/manifest.json"
+          ]:
+              file = project / relative
+              add(f"{relative}: {'FOUND' if file.exists() else 'MISSING'}")
+
+          section("RECONSTRUCTION NOTES")
+
+          add("This report describes recovered assets and IL2CPP metadata.")
+          add("IL2CPP method signatures are not original method bodies.")
+          add("A faithful reconstruction requires implementing missing logic.")
+
+          output = Path("reconstruction-report.txt")
+          output.write_text("\n".join(report), encoding="utf-8")
+
+          print("\n".join(report[:100]))
+          print(f"\nReport generated: {output}")
+
+          PY
+
+      - name: Upload Reconstruction Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: GrannyPlus-Reconstruction-Report
+          path: reconstruction-report.txt
+          if-no-files-found: error
+          retention-days: 7
