@@ -10,24 +10,17 @@ permissions:
 jobs:
 
   cpp2il-ilspy:
-    name: Recover C# and IL2CPP
+    name: Cpp2IL and C# Recovery
     runs-on: ubuntu-24.04
     timeout-minutes: 240
 
-    env:
-      GH_TOKEN: ${{ github.token }}
-      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
-      DOTNET_NOLOGO: "1"
-      NO_COLOR: "true"
-
     steps:
-
-      - name: Checkout private repository
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           lfs: true
 
-      - name: Extract Granny Plus
+      - name: Extract game
         shell: bash
         run: |
           set -euo pipefail
@@ -35,14 +28,13 @@ jobs:
           ZIP="$GITHUB_WORKSPACE/input/Granny-Plus.zip"
 
           if [ ! -f "$ZIP" ]; then
-            echo "::error title=ZIP no encontrado::Falta input/Granny-Plus.zip"
-            ls -lah input || true
+            echo "::error::No existe input/Granny-Plus.zip"
             exit 1
           fi
 
-          mkdir -p work/game out/cpp2il out/logs
+          mkdir -p work/game out/cpp2il out/csharp out/logs
 
-          echo "Archivo:"
+          echo "Tamaño del ZIP:"
           ls -lh "$ZIP"
 
           unzip -q "$ZIP" -d work/game
@@ -56,137 +48,129 @@ jobs:
           GAMEASSEMBLY="$(find work/game -type f \
             -name GameAssembly.dll | head -n 1)"
 
-          if [ -z "$EXE" ] || [ -z "$METADATA" ] || [ -z "$GAMEASSEMBLY" ]; then
-            echo "::error title=Archivos IL2CPP faltantes::Se necesita EXE, global-metadata.dat y GameAssembly.dll"
+          if [ -z "$EXE" ]; then
+            echo "::error::No se encontró el EXE del juego"
+            exit 1
+          fi
+
+          if [ -z "$METADATA" ]; then
+            echo "::error::No se encontró global-metadata.dat"
+            exit 1
+          fi
+
+          if [ -z "$GAMEASSEMBLY" ]; then
+            echo "::error::No se encontró GameAssembly.dll"
             exit 1
           fi
 
           GAME_DIR="$(dirname "$EXE")"
 
-          echo "GAME_DIR=$(realpath "$GAME_DIR")" >> "$GITHUB_ENV"
+          echo "GAME_DIR=$GAME_DIR" >> "$GITHUB_ENV"
 
           echo "Ejecutable: $EXE"
           echo "Metadata: $METADATA"
           echo "GameAssembly: $GAMEASSEMBLY"
 
-      - name: Install .NET runtimes
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: |
-            8.0.x
-            9.0.x
-
-      - name: Download Cpp2IL
+      - name: Download Cpp2IL development build
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p tools/cpp2il
 
-          TAG="$(gh release list \
-            --repo SamboyCoding/Cpp2IL \
-            --limit 1 \
-            --json tagName \
-            --jq '.[0].tagName')"
+          URL="https://nightly.link/SamboyCoding/Cpp2IL/workflows/dotnet-core/development/Cpp2IL-net9-linux-x64.zip"
 
-          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
-            echo "::error title=Cpp2IL no disponible::No se encontró una release"
+          echo "Descargando Cpp2IL Linux x64..."
+
+          curl -fL --retry 3 --retry-delay 5 \
+            "$URL" \
+            -o tools/cpp2il/cpp2il.zip
+
+          if ! unzip -tq tools/cpp2il/cpp2il.zip; then
+            echo "::error::El ZIP de Cpp2IL no es válido"
             exit 1
           fi
 
-          echo "Cpp2IL: $TAG"
+          unzip -q -o tools/cpp2il/cpp2il.zip \
+            -d tools/cpp2il/app
 
-          ASSET="$(gh release view "$TAG" \
-            --repo SamboyCoding/Cpp2IL \
-            --json assets \
-            --jq '.assets[].name' |
-            grep -Ei 'linux.*(x64|x86_64).*\.zip$' |
-            head -n 1)"
-
-          if [ -z "$ASSET" ]; then
-            ASSET="$(gh release view "$TAG" \
-              --repo SamboyCoding/Cpp2IL \
-              --json assets \
-              --jq '.assets[].name' |
-              grep -Ei 'linux.*\.zip$' |
-              grep -Eiv 'arm|aarch64' |
-              head -n 1)"
-          fi
-
-          if [ -z "$ASSET" ]; then
-            echo "::error title=Paquete Linux no encontrado::No hay ZIP Linux x64"
-            exit 1
-          fi
-
-          echo "Paquete: $ASSET"
-
-          gh release download "$TAG" \
-            --repo SamboyCoding/Cpp2IL \
-            --pattern "$ASSET" \
-            --dir tools/cpp2il
-
-          unzip -q -o tools/cpp2il/*.zip -d tools/cpp2il
-
-          BIN="$(find tools/cpp2il -type f \
-            -iname '*cpp2il*' \
-            ! -iname '*.zip' \
-            ! -iname '*.dll' \
-            ! -iname '*.pdb' |
-            head -n 1)"
+          BIN="$(find tools/cpp2il/app -type f \
+            -name 'Cpp2IL' | head -n 1)"
 
           if [ -z "$BIN" ]; then
-            echo "::error title=Ejecutable Cpp2IL no encontrado::"
-            find tools/cpp2il -maxdepth 4 -type f
+            echo "::error::No se encontró el ejecutable Cpp2IL"
+            find tools/cpp2il/app -maxdepth 4 -type f
             exit 1
           fi
 
           chmod +x "$BIN"
 
-          echo "CPP2IL=$(realpath "$BIN")" >> "$GITHUB_ENV"
+          echo "CPP2IL=$GITHUB_WORKSPACE/$BIN" >> "$GITHUB_ENV"
 
-          "$BIN" --list-output-formats \
-            2>&1 | tee out/cpp2il/output-formats.txt || true
+          echo "Cpp2IL descargado:"
+          ls -lh "$BIN"
+
+      - name: Check Cpp2IL formats
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p out/logs
+
+          "$CPP2IL" --list-output-formats \
+            2>&1 | tee out/logs/cpp2il-formats.txt
 
       - name: Recover IL2CPP assemblies
         shell: bash
         run: |
           set +e
 
+          mkdir -p out/cpp2il out/logs
+
           run_format() {
             FORMAT="$1"
             DEST="$2"
             LOG="out/logs/cpp2il-$FORMAT.log"
 
-            echo "=================================="
-            echo "Formato: $FORMAT"
-            echo "=================================="
-
             mkdir -p "$DEST"
+
+            echo ""
+            echo "======================================"
+            echo "Formato: $FORMAT"
+            echo "======================================"
 
             "$CPP2IL" \
               --game-path "$GAME_DIR" \
               --output-as "$FORMAT" \
               --output-to "$GITHUB_WORKSPACE/$DEST" \
-              2>&1 | tee "$LOG" | tail -n 35
+              2>&1 | tee "$LOG"
 
             CODE=${PIPESTATUS[0]}
 
-            echo "$FORMAT exit code: $CODE"
+            echo "Código de salida: $CODE"
 
             if [ "$CODE" -ne 0 ]; then
-              echo "El formato $FORMAT no pudo completarse."
+              echo "No se pudo completar $FORMAT."
             fi
+
+            return 0
           }
 
-          run_format dll_il_recovery out/cpp2il/il-recovery
+          run_format dll_il_recovery \
+            out/cpp2il/il-recovery
 
-          run_format dll_default out/cpp2il/dummy-dll
+          run_format diffable-cs \
+            out/cpp2il/diffable-cs
 
-          run_format diffable-cs out/cpp2il/diffable-cs
+          echo "Cpp2IL terminó sus intentos."
 
-          echo "Recuperación Cpp2IL terminada."
+      - name: Install .NET for ILSpy
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
 
-      - name: Install ILSpy
+      - name: Install ILSpy command line
         shell: bash
         run: |
           dotnet tool install --global ilspycmd
@@ -199,13 +183,12 @@ jobs:
         run: |
           set +e
 
-          mkdir -p out/csharp
+          mkdir -p out/csharp out/logs
 
-          find out/cpp2il \
-            -type f \
-            -iname '*.dll' \
-            -print0 |
+          COUNT=0
+
           while IFS= read -r -d '' DLL; do
+            COUNT=$((COUNT + 1))
 
             NAME="$(basename "$DLL" .dll)"
             DEST="out/csharp/$NAME"
@@ -220,29 +203,39 @@ jobs:
               > "out/logs/ilspy-$NAME.log" 2>&1
 
             if [ $? -ne 0 ]; then
-              echo "Error al decompilar $NAME"
+              echo "No se pudo decompilar: $NAME"
             fi
 
-          done
+          done < <(find out/cpp2il -type f \
+            -iname '*.dll' -print0)
+
+          echo "DLL procesadas: $COUNT"
 
       - name: Generate Cpp2IL report
         if: always()
         shell: bash
         run: |
-          mkdir -p out
+          set +e
+
+          if [ -e out ] && [ ! -d out ]; then
+            mv out out-file-backup
+          fi
+
+          mkdir -p out/cpp2il out/csharp out/logs
 
           {
-            echo "GRANNY PLUS - CPP2IL AND ILSPY"
-            echo "Date: $(date -u)"
+            echo "GRANNY PLUS - CPP2IL REPORT"
+            echo "Fecha: $(date -u)"
             echo ""
-            echo "Recovered files:"
-            find out/cpp2il out/csharp -type f 2>/dev/null | sort
+            echo "Archivos recuperados:"
+            find out/cpp2il out/csharp \
+              -type f 2>/dev/null | sort
             echo ""
-            echo "Directory sizes:"
-            du -sh out/cpp2il/* out/csharp/* 2>/dev/null || true
+            echo "Tamaños:"
+            du -sh out/cpp2il out/csharp 2>/dev/null
           } > out/cpp2il-report.txt
 
-      - name: Upload Cpp2IL and C# results
+      - name: Upload Cpp2IL results
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -253,22 +246,17 @@ jobs:
 
 
   ghidra-analysis:
-    name: Ghidra Native Code Analysis
+    name: Ghidra Native Analysis
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GHIDRA_HEADLESS_MAXMEM: 4G
-
     steps:
-
-      - name: Checkout private repository
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           lfs: true
 
-      - name: Extract GameAssembly.dll
+      - name: Extract GameAssembly
         shell: bash
         run: |
           set -euo pipefail
@@ -276,7 +264,7 @@ jobs:
           ZIP="$GITHUB_WORKSPACE/input/Granny-Plus.zip"
 
           if [ ! -f "$ZIP" ]; then
-            echo "::error title=ZIP no encontrado::Falta input/Granny-Plus.zip"
+            echo "::error::No existe input/Granny-Plus.zip"
             exit 1
           fi
 
@@ -288,13 +276,12 @@ jobs:
             -name GameAssembly.dll | head -n 1)"
 
           if [ -z "$DLL" ]; then
-            echo "::error title=GameAssembly.dll no encontrado::"
+            echo "::error::GameAssembly.dll no encontrado"
             exit 1
           fi
 
           echo "GAMEASSEMBLY=$(realpath "$DLL")" >> "$GITHUB_ENV"
 
-          echo "Archivo nativo: $DLL"
           ls -lh "$DLL"
 
       - name: Install Java 25
@@ -305,23 +292,24 @@ jobs:
 
       - name: Download Ghidra
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           mkdir -p tools/ghidra
 
-          TAG="$(gh release list \
+          TAG="$(gh release view \
             --repo NationalSecurityAgency/ghidra \
-            --limit 1 \
             --json tagName \
-            --jq '.[0].tagName')"
+            --jq '.tagName')"
 
           if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
-            echo "::error title=Ghidra no disponible::"
+            echo "::error::No se encontró Ghidra"
             exit 1
           fi
 
-          echo "Ghidra: $TAG"
+          echo "Versión: $TAG"
 
           ASSET="$(gh release view "$TAG" \
             --repo NationalSecurityAgency/ghidra \
@@ -331,7 +319,7 @@ jobs:
             head -n 1)"
 
           if [ -z "$ASSET" ]; then
-            echo "::error title=Ghidra ZIP no encontrado::"
+            echo "::error::No se encontró el ZIP oficial de Ghidra"
             exit 1
           fi
 
@@ -342,13 +330,11 @@ jobs:
 
           unzip -q tools/ghidra/*.zip -d tools/ghidra
 
-          HEADLESS="$(find tools/ghidra \
-            -type f \
-            -path '*/support/analyzeHeadless' |
-            head -n 1)"
+          HEADLESS="$(find tools/ghidra -type f \
+            -path '*/support/analyzeHeadless' | head -n 1)"
 
           if [ -z "$HEADLESS" ]; then
-            echo "::error title=Ghidra headless no encontrado::"
+            echo "::error::No se encontró analyzeHeadless"
             exit 1
           fi
 
@@ -356,16 +342,16 @@ jobs:
 
           GHIDRA_HOME="$(dirname "$(dirname "$HEADLESS")")"
 
-          echo "GHIDRA_HOME=$(realpath "$GHIDRA_HOME")" >> "$GITHUB_ENV"
+          echo "GHIDRA_HOME=$GHIDRA_HOME" >> "$GITHUB_ENV"
 
-          echo "Ghidra instalado: $GHIDRA_HOME"
+          echo "Ghidra instalado en $GHIDRA_HOME"
 
       - name: Create Ghidra decompiler script
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p ghidra-scripts
+          mkdir -p ghidra-scripts out/ghidra
 
           cat > ghidra-scripts/ExportDecompiledFunctions.java <<'JAVA'
           import ghidra.app.decompiler.DecompInterface;
@@ -385,7 +371,7 @@ jobs:
                   String[] args = getScriptArgs();
 
                   if (args.length < 1) {
-                      printerr("Missing output file argument");
+                      printerr("Falta la ruta del archivo de salida");
                       return;
                   }
 
@@ -402,7 +388,7 @@ jobs:
                   decompiler.setSimplificationStyle("decompile");
 
                   if (!decompiler.openProgram(currentProgram)) {
-                      output.println("Could not open program");
+                      output.println("No se pudo abrir el programa");
                       output.close();
                       return;
                   }
@@ -414,18 +400,22 @@ jobs:
                   int successful = 0;
                   int failed = 0;
 
-                  output.println("GRANNY PLUS - GAMEASSEMBLY DECOMPILATION");
-                  output.println("Program: " + currentProgram.getName());
+                  output.println("GRANNY PLUS - GAMEASSEMBLY");
+                  output.println("Programa: " + currentProgram.getName());
                   output.flush();
 
                   while (functions.hasNext() && !monitor.isCancelled()) {
 
                       Function function = functions.next();
 
+                      if (function.isExternal() || function.isThunk()) {
+                          continue;
+                      }
+
                       total++;
 
                       monitor.setMessage(
-                          "Decompiling " + function.getName()
+                          "Decompilando: " + function.getName()
                       );
 
                       output.println();
@@ -455,8 +445,7 @@ jobs:
                           } else {
 
                               output.println(
-                                  "// DECOMPILATION FAILED: "
-                                  + result.getErrorMessage()
+                                  "// FAILED: " + result.getErrorMessage()
                               );
 
                               failed++;
@@ -477,22 +466,21 @@ jobs:
                   }
 
                   output.println();
-                  output.println("TOTAL FUNCTIONS: " + total);
+                  output.println("TOTAL: " + total);
                   output.println("SUCCESSFUL: " + successful);
                   output.println("FAILED: " + failed);
 
                   output.close();
-
                   decompiler.dispose();
 
-                  println("Functions processed: " + total);
-                  println("Successful: " + successful);
-                  println("Failed: " + failed);
+                  println("Funciones procesadas: " + total);
+                  println("Correctas: " + successful);
+                  println("Fallidas: " + failed);
               }
           }
           JAVA
 
-      - name: Analyze GameAssembly and export pseudocode
+      - name: Analyze GameAssembly
         shell: bash
         run: |
           set -o pipefail
@@ -511,23 +499,23 @@ jobs:
             -max-cpu 2 \
             2>&1 | tee out/ghidra/ghidra-analysis.log
 
-      - name: Save Ghidra report
+      - name: Generate Ghidra report
         if: always()
         shell: bash
         run: |
+          set +e
+
           mkdir -p out/ghidra
 
           {
             echo "GRANNY PLUS - GHIDRA REPORT"
-            echo "Date: $(date -u)"
+            echo "Fecha: $(date -u)"
             echo ""
-            echo "GameAssembly:"
-            find work -name GameAssembly.dll -exec ls -lh {} \; 2>/dev/null || true
+            echo "Archivos:"
+            find out/ghidra -type f \
+              -printf '%p %s bytes\n' 2>/dev/null
             echo ""
-            echo "Generated files:"
-            find out/ghidra -type f -printf '%p %s bytes\n' 2>/dev/null || true
-            echo ""
-            du -sh out/ghidra/* 2>/dev/null || true
+            du -sh out/ghidra 2>/dev/null
           } > out/ghidra/report.txt
 
       - name: Upload Ghidra results
@@ -541,16 +529,12 @@ jobs:
 
 
   unity-assets:
-    name: Recover Unity Project and Assets
+    name: AssetRipper Unity Recovery
     runs-on: windows-latest
     timeout-minutes: 240
 
-    env:
-      GH_TOKEN: ${{ github.token }}
-
     steps:
-
-      - name: Checkout private repository
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           lfs: true
@@ -564,21 +548,30 @@ jobs:
             throw "No existe input/Granny-Plus.zip"
           }
 
-          New-Item -ItemType Directory -Force -Path "work/game" | Out-Null
-          New-Item -ItemType Directory -Force -Path "output" | Out-Null
+          New-Item -ItemType Directory -Force `
+            -Path "work/game" | Out-Null
 
-          Expand-Archive -LiteralPath $zip -DestinationPath "work/game" -Force
+          New-Item -ItemType Directory -Force `
+            -Path "output" | Out-Null
 
-          $exe = Get-ChildItem "work/game" -Recurse -File -Filter "*.exe" |
-            Where-Object { $_.Name -notlike "UnityCrashHandler*" } |
+          Expand-Archive -LiteralPath $zip `
+            -DestinationPath "work/game" -Force
+
+          $exe = Get-ChildItem "work/game" -Recurse -File |
+            Where-Object {
+              $_.Extension -eq ".exe" -and
+              $_.Name -notlike "UnityCrashHandler*"
+            } |
             Select-Object -First 1
 
           if (!$exe) {
-            throw "No se encontró el ejecutable del juego"
+            throw "No se encontró el EXE del juego"
           }
 
           $data = Get-ChildItem $exe.Directory.FullName -Directory |
-            Where-Object { $_.Name -like "*_Data" } |
+            Where-Object {
+              $_.Name -like "*_Data"
+            } |
             Select-Object -First 1
 
           if (!$data) {
@@ -587,17 +580,19 @@ jobs:
 
           "GAME_DATA=$($data.FullName)" >> $env:GITHUB_ENV
 
+          Write-Host "EXE: $($exe.FullName)"
           Write-Host "Unity Data: $($data.FullName)"
 
       - name: Download AssetRipper
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $release = gh release list `
+          $release = gh release view `
             --repo AssetRipper/AssetRipper `
-            --limit 1 `
-            --json tagName | ConvertFrom-Json
+            --json tagName,assets | ConvertFrom-Json
 
-          $tag = $release[0].tagName
+          $tag = $release.tagName
 
           if (!$tag) {
             throw "No se encontró una release de AssetRipper"
@@ -605,21 +600,26 @@ jobs:
 
           Write-Host "AssetRipper: $tag"
 
-          $assets = gh release view $tag `
-            --repo AssetRipper/AssetRipper `
-            --json assets | ConvertFrom-Json
-
-          $asset = $assets.assets |
+          $asset = $release.assets |
             Where-Object {
-              $_.name -match "win" -and $_.name -match "\.zip$"
+              $_.name -match "^AssetRipper_win_x64\.zip$"
             } |
             Select-Object -First 1
 
           if (!$asset) {
-            throw "No se encontró el ZIP de AssetRipper para Windows"
+            $asset = $release.assets |
+              Where-Object {
+                $_.name -match "win.*x64.*\.zip$"
+              } |
+              Select-Object -First 1
           }
 
-          New-Item -ItemType Directory -Force -Path "tools" | Out-Null
+          if (!$asset) {
+            throw "No se encontró el paquete Windows x64"
+          }
+
+          New-Item -ItemType Directory -Force `
+            -Path "tools" | Out-Null
 
           gh release download $tag `
             --repo AssetRipper/AssetRipper `
@@ -629,11 +629,17 @@ jobs:
           $archive = Get-ChildItem tools -Filter "*.zip" |
             Select-Object -First 1
 
-          Expand-Archive -LiteralPath $archive.FullName `
-            -DestinationPath tools/AssetRipper -Force
+          if (!$archive) {
+            throw "No se descargó el ZIP de AssetRipper"
+          }
 
-          $exe = Get-ChildItem tools/AssetRipper -Recurse -File |
-            Where-Object { $_.Name -eq "AssetRipper.GUI.Free.exe" } |
+          Expand-Archive -LiteralPath $archive.FullName `
+            -DestinationPath "tools/AssetRipper" -Force
+
+          $exe = Get-ChildItem "tools/AssetRipper" -Recurse -File |
+            Where-Object {
+              $_.Name -eq "AssetRipper.GUI.Free.exe"
+            } |
             Select-Object -First 1
 
           if (!$exe) {
@@ -671,16 +677,18 @@ jobs:
             }
 
             if (!$ready) {
-              throw "AssetRipper no inició su servidor HTTP"
+              throw "AssetRipper no inició su servidor"
             }
 
-            Write-Host "Cargando datos de Unity..."
+            Write-Host "Cargando archivos Unity..."
 
             $load = Invoke-WebRequest `
               -Uri "http://127.0.0.1:17891/LoadFolder" `
               -Method POST `
               -ContentType "application/x-www-form-urlencoded" `
-              -Body @{ Path = $env:GAME_DATA } `
+              -Body @{
+                Path = $env:GAME_DATA
+              } `
               -TimeoutSec 600
 
             Write-Host $load.Content
@@ -711,15 +719,17 @@ jobs:
         if: always()
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force `
+            -Path "output" | Out-Null
+
           if (Test-Path "assetripper.log") {
-            Copy-Item "assetripper.log" "output/assetripper.log" -Force
+            Copy-Item "assetripper.log" `
+              "output/assetripper.log" -Force
           }
 
-          if (Test-Path "output") {
-            Get-ChildItem output -Recurse -File |
-              Select-Object FullName, Length |
-              Format-Table -AutoSize
-          }
+          Get-ChildItem "output" -Recurse -File |
+            Select-Object FullName, Length |
+            Format-Table -AutoSize
 
       - name: Upload Unity project
         if: always()
