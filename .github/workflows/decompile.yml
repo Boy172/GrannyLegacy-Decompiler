@@ -3,10 +3,6 @@ name: Decompile Granny Plus (IL2CPP)
 
 on:
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: "Etiqueta de la release donde subiste el ZIP"
-        default: "game"
 
 permissions:
   contents: read
@@ -22,42 +18,56 @@ jobs:
       DOTNET_CLI_TELEMETRY_OPTOUT: "1"
 
     steps:
-      - name: Download Granny-Plus.zip from private release
+      - name: Checkout private repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Download Granny Plus from input
         run: |
           set -euo pipefail
+
           mkdir -p work out
-          cd work
 
-          gh release download "${{ inputs.release_tag }}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern 'Granny-Plus.zip'
+          ZIP="$GITHUB_WORKSPACE/input/Granny-Plus.zip"
 
-          zip="./Granny-Plus.zip"
-
-          [ -f "$zip" ] || {
-            echo "::error title=ZIP no encontrado::No se encontró Granny-Plus.zip en la Release"
+          if [ ! -f "$ZIP" ]; then
+            echo "::error title=ZIP no encontrado::No existe input/Granny-Plus.zip"
+            echo "Contenido de input:"
+            ls -lah "$GITHUB_WORKSPACE/input" || true
             exit 1
-          }
+          fi
 
-          mkdir game
-          unzip -q "$zip" -d game
+          echo "Archivo encontrado:"
+          ls -lh "$ZIP"
 
-          exe="$(find game -maxdepth 4 -name '*.exe' ! -name 'UnityCrashHandler*' | head -n 1)"
+          mkdir -p work/game
+          unzip -q "$ZIP" -d work/game
 
-          [ -n "$exe" ] || {
-            echo "::error title=No encontre el EXE::Revisa el contenido del ZIP"
+          exe="$(find work/game -maxdepth 5 -name '*.exe' ! -name 'UnityCrashHandler*' | head -n 1)"
+
+          if [ -z "$exe" ]; then
+            echo "::error title=EXE no encontrado::Revisa el contenido del ZIP"
             exit 1
-          }
+          fi
 
-          echo "GAME_DIR=$(realpath "$(dirname "$exe")")" >> "$GITHUB_ENV"
+          GAME_DIR="$(realpath "$(dirname "$exe")")"
+
+          echo "GAME_DIR=$GAME_DIR" >> "$GITHUB_ENV"
 
           echo "Carpeta del juego:"
-          realpath "$(dirname "$exe")"
-          ls "$(dirname "$exe")" | head -30
+          echo "$GAME_DIR"
+          ls "$GAME_DIR" | head -30
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
 
       - name: Get latest Cpp2IL
         run: |
           set -euo pipefail
+
           cd work
 
           tag="$(gh release list \
@@ -66,9 +76,14 @@ jobs:
             --json tagName \
             --jq '.[0].tagName')"
 
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "::error title=Cpp2IL no disponible::No se pudo obtener la versión"
+            exit 1
+          fi
+
           echo "Cpp2IL: $tag"
 
-          mkdir cpp2il
+          mkdir -p cpp2il
 
           gh release download "$tag" \
             --repo SamboyCoding/Cpp2IL \
@@ -86,10 +101,11 @@ jobs:
             ! -iname '*arm*' \
             ! -iname '*win*' | head -n 1)"
 
-          [ -n "$bin" ] || {
+          if [ -z "$bin" ]; then
             echo "::error title=Cpp2IL no encontrado::No se encontró el ejecutable Linux"
+            find cpp2il -maxdepth 3 -type f | head -50
             exit 1
-          }
+          fi
 
           chmod +x "$bin"
 
@@ -100,6 +116,7 @@ jobs:
       - name: Dump game structure and dummy DLLs
         run: |
           set +e
+
           cd work
 
           run_logged() {
@@ -137,15 +154,18 @@ jobs:
             --output-as dll_default \
             --output-to ../out/dummydll
 
-          [ "$first" -eq 0 ] || {
-            echo "::error title=Cpp2IL fallo::Revisa el Summary"
+          second=$?
+
+          if [ "$first" -ne 0 ] && [ "$second" -ne 0 ]; then
+            echo "::error title=Cpp2IL fallo::Fallaron los dos formatos principales"
             exit 1
-          }
+          fi
 
       - name: Try IL recovery
         continue-on-error: true
         run: |
           set +e
+
           cd work
 
           "$CPP2IL" \
@@ -178,32 +198,34 @@ jobs:
           dll="$(find out/il-recovery out/dummydll \
             -name 'Assembly-CSharp.dll' 2>/dev/null | head -n 1)"
 
-          [ -n "$dll" ] || {
+          if [ -z "$dll" ]; then
             echo "::error title=Sin Assembly-CSharp.dll::No hay DLL para decompilar"
             exit 1
-          }
+          fi
 
           echo "Decompilando: $dll"
 
           ilspycmd -p -o out/csharp "$dll" 2>&1 | tail -n 25
 
-      - name: Pack results
+      - name: Generate summary
+        if: always()
         run: |
-          set -euo pipefail
+          echo "## Granny Plus - Resultado del análisis" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Archivo de entrada: input/Granny-Plus.zip" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          du -sh out/* || true
-
-          {
-            echo "### Resultado"
-            echo '```'
-            du -sh out/*
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -d out ]; then
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            du -sh out/* 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload decompiled files
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: granny-decompiled
           path: out
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
