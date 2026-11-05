@@ -1,400 +1,209 @@
 
-name: Granny Legacy - Unity Extraction
+name: Decompile Granny Plus (IL2CPP)
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Etiqueta de la release donde subiste el ZIP"
+        default: "game"
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
   decompile:
-    runs-on: windows-latest
-    timeout-minutes: 360
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NO_COLOR: "true"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          lfs: true
-
-      - name: Prepare folders
-        shell: pwsh
+      - name: Download Granny-Plus.zip from private release
         run: |
-          New-Item -ItemType Directory -Force -Path input, output, tools | Out-Null
-          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP/game" | Out-Null
+          set -euo pipefail
+          mkdir -p work out
+          cd work
 
-      - name: Extract game ZIP
-        shell: pwsh
+          gh release download "${{ inputs.release_tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Granny-Plus.zip'
+
+          zip="./Granny-Plus.zip"
+
+          [ -f "$zip" ] || {
+            echo "::error title=ZIP no encontrado::No se encontró Granny-Plus.zip en la Release"
+            exit 1
+          }
+
+          mkdir game
+          unzip -q "$zip" -d game
+
+          exe="$(find game -maxdepth 4 -name '*.exe' ! -name 'UnityCrashHandler*' | head -n 1)"
+
+          [ -n "$exe" ] || {
+            echo "::error title=No encontre el EXE::Revisa el contenido del ZIP"
+            exit 1
+          }
+
+          echo "GAME_DIR=$(realpath "$(dirname "$exe")")" >> "$GITHUB_ENV"
+
+          echo "Carpeta del juego:"
+          realpath "$(dirname "$exe")"
+          ls "$(dirname "$exe")" | head -30
+
+      - name: Get latest Cpp2IL
         run: |
-          $zip = Get-ChildItem "$env:GITHUB_WORKSPACE/input" -Filter "*.zip" -File |
-            Select-Object -First 1
+          set -euo pipefail
+          cd work
 
-          if (-not $zip) {
-            throw "No se encontró ningún ZIP en input."
+          tag="$(gh release list \
+            --repo SamboyCoding/Cpp2IL \
+            --limit 1 \
+            --json tagName \
+            --jq '.[0].tagName')"
+
+          echo "Cpp2IL: $tag"
+
+          mkdir cpp2il
+
+          gh release download "$tag" \
+            --repo SamboyCoding/Cpp2IL \
+            --pattern '*Linux*' \
+            --dir cpp2il
+
+          for z in cpp2il/*.zip; do
+            [ -e "$z" ] && unzip -q -o "$z" -d cpp2il
+          done
+
+          bin="$(find cpp2il -type f -iname '*cpp2il*' \
+            ! -iname '*.zip' \
+            ! -iname '*.pdb' \
+            ! -iname '*.dll' \
+            ! -iname '*arm*' \
+            ! -iname '*win*' | head -n 1)"
+
+          [ -n "$bin" ] || {
+            echo "::error title=Cpp2IL no encontrado::No se encontró el ejecutable Linux"
+            exit 1
           }
 
-          Write-Host "ZIP: $($zip.FullName)"
-          Write-Host "Tamaño: $($zip.Length) bytes"
+          chmod +x "$bin"
 
-          Expand-Archive `
-            -LiteralPath $zip.FullName `
-            -DestinationPath "$env:RUNNER_TEMP/game" `
-            -Force
+          echo "CPP2IL=$(realpath "$bin")" >> "$GITHUB_ENV"
 
-          Write-Host "Extracción del ZIP completada."
+          "$bin" --list-output-formats || true
 
-      - name: Locate Unity files
-        shell: pwsh
+      - name: Dump game structure and dummy DLLs
         run: |
-          $root = "$env:RUNNER_TEMP/game"
+          set +e
+          cd work
 
-          $assembly = Get-ChildItem $root `
-            -Filter "GameAssembly.dll" `
-            -File -Recurse |
-            Select-Object -First 1
+          run_logged() {
+            name="$1"
+            shift
 
-          $metadata = Get-ChildItem $root `
-            -Filter "global-metadata.dat" `
-            -File -Recurse |
-            Select-Object -First 1
+            log="../out/$name.log"
 
-          $dataFolder = Get-ChildItem $root -Directory -Recurse |
-            Where-Object { $_.Name -like "*_Data" } |
-            Select-Object -First 1
+            "$@" 2>&1 | tee "$log" | tail -n 20
+            code=${PIPESTATUS[0]}
 
-          if (-not $dataFolder) {
-            $globalManagers = Get-ChildItem $root `
-              -Filter "globalgamemanagers" `
-              -File -Recurse |
-              Select-Object -First 1
+            if [ "$code" -ne 0 ]; then
+              {
+                echo "### Fallo: $name (codigo $code)"
+                echo '```'
+                tail -n 40 "$log"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
 
-            if ($globalManagers) {
-              $dataFolder = $globalManagers.Directory
-            }
+            return "$code"
           }
 
-          if (-not $assembly) {
-            throw "No se encontró GameAssembly.dll."
+          run_logged cpp2il-diffable-cs \
+            "$CPP2IL" \
+            --game-path "$GAME_DIR" \
+            --output-as diffable-cs \
+            --output-to ../out/diffable-cs
+
+          first=$?
+
+          run_logged cpp2il-dummydll \
+            "$CPP2IL" \
+            --game-path "$GAME_DIR" \
+            --output-as dll_default \
+            --output-to ../out/dummydll
+
+          [ "$first" -eq 0 ] || {
+            echo "::error title=Cpp2IL fallo::Revisa el Summary"
+            exit 1
           }
 
-          if (-not $metadata) {
-            throw "No se encontró global-metadata.dat."
-          }
-
-          if (-not $dataFolder) {
-            throw "No se encontró la carpeta Unity *_Data."
-          }
-
-          "ASSEMBLY=$($assembly.FullName)" |
-            Out-File $env:GITHUB_ENV -Append
-
-          "METADATA=$($metadata.FullName)" |
-            Out-File $env:GITHUB_ENV -Append
-
-          "GAMEDATA=$($dataFolder.FullName)" |
-            Out-File $env:GITHUB_ENV -Append
-
-          Write-Host "GameAssembly: $($assembly.FullName)"
-          Write-Host "Metadata: $($metadata.FullName)"
-          Write-Host "Unity Data: $($dataFolder.FullName)"
-
-      - name: Download AssetRipper
-        shell: pwsh
+      - name: Try IL recovery
+        continue-on-error: true
         run: |
-          $zip = "$env:RUNNER_TEMP/AssetRipper_win_x64.zip"
-          $destination = "$env:RUNNER_TEMP/AssetRipper"
+          set +e
+          cd work
 
-          $url = "https://github.com/AssetRipper/AssetRipper/releases/latest/download/AssetRipper_win_x64.zip"
+          "$CPP2IL" \
+            --game-path "$GAME_DIR" \
+            --output-as dll_il_recovery \
+            --output-to ../out/il-recovery \
+            2>&1 | tee ../out/cpp2il-il-recovery.log | tail -n 25
 
-          Write-Host "Descargando AssetRipper Windows x64..."
+          code=${PIPESTATUS[0]}
 
-          Invoke-WebRequest `
-            -Uri $url `
-            -OutFile $zip
+          if [ "$code" -ne 0 ]; then
+            {
+              echo "### IL recovery no funciono (codigo $code), es opcional"
+              echo '```'
+              tail -n 30 ../out/cpp2il-il-recovery.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
-          if (-not (Test-Path $zip)) {
-            throw "No se descargó el ZIP de AssetRipper."
-          }
+          exit "$code"
 
-          $size = (Get-Item $zip).Length
-
-          if ($size -lt 1000000) {
-            throw "El ZIP parece incompleto. Tamaño: $size bytes"
-          }
-
-          Write-Host "ZIP descargado: $size bytes"
-
-          Expand-Archive `
-            -LiteralPath $zip `
-            -DestinationPath $destination `
-            -Force
-
-          $tool = Get-ChildItem $destination `
-            -Filter "AssetRipper.GUI.Free.exe" `
-            -File -Recurse |
-            Select-Object -First 1
-
-          if (-not $tool) {
-            throw "No se encontró AssetRipper.GUI.Free.exe."
-          }
-
-          "ASSETRIPPER=$($tool.FullName)" |
-            Out-File $env:GITHUB_ENV -Append
-
-          Write-Host "Ejecutable: $($tool.FullName)"
-
-      - name: Verify AssetRipper
-        shell: pwsh
+      - name: Decompile Assembly-CSharp with ILSpy
+        continue-on-error: true
         run: |
-          if (-not (Test-Path -LiteralPath $env:ASSETRIPPER)) {
-            throw "El ejecutable de AssetRipper no existe."
+          set -euo pipefail
+
+          dotnet tool install --global ilspycmd
+          export PATH="$PATH:$HOME/.dotnet/tools"
+
+          dll="$(find out/il-recovery out/dummydll \
+            -name 'Assembly-CSharp.dll' 2>/dev/null | head -n 1)"
+
+          [ -n "$dll" ] || {
+            echo "::error title=Sin Assembly-CSharp.dll::No hay DLL para decompilar"
+            exit 1
           }
 
-          $file = Get-Item -LiteralPath $env:ASSETRIPPER
+          echo "Decompilando: $dll"
 
-          Write-Host "Ejecutable: $($file.FullName)"
-          Write-Host "Tamaño: $($file.Length) bytes"
-          Write-Host "Sistema: $env:RUNNER_OS"
-          Write-Host "Arquitectura: $env:PROCESSOR_ARCHITECTURE"
+          ilspycmd -p -o out/csharp "$dll" 2>&1 | tail -n 25
 
-          if ($file.Length -lt 1000000) {
-            throw "El ejecutable parece incompleto."
-          }
-
-      - name: Run AssetRipper
-        shell: pwsh
-        timeout-minutes: 120
+      - name: Pack results
         run: |
-          $output = "$env:GITHUB_WORKSPACE/output/UnityProject"
-          $port = 17891
-          $baseUrl = "http://127.0.0.1:$port"
-          $log = "$env:RUNNER_TEMP/AssetRipper.log"
+          set -euo pipefail
 
-          New-Item -ItemType Directory -Force -Path $output | Out-Null
+          du -sh out/* || true
 
-          Write-Host "Iniciando AssetRipper..."
-          Write-Host "Entrada: $env:GAMEDATA"
-          Write-Host "Salida: $output"
+          {
+            echo "### Resultado"
+            echo '```'
+            du -sh out/*
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          $process = Start-Process `
-            -FilePath "$env:ASSETRIPPER" `
-            -ArgumentList @(
-              "--headless",
-              "--port",
-              "$port",
-              "--log-path",
-              "`"$log`""
-            ) `
-            -WorkingDirectory (Split-Path "$env:ASSETRIPPER") `
-            -PassThru
-
-          Write-Host "PID: $($process.Id)"
-
-          $ready = $false
-
-          Write-Host "Esperando al servidor..."
-
-          for ($i = 0; $i -lt 90; $i++) {
-            Start-Sleep -Seconds 2
-
-            $process.Refresh()
-
-            if ($process.HasExited) {
-              if (Test-Path $log) {
-                Get-Content $log -Tail 80
-              }
-
-              throw "AssetRipper se cerró durante el inicio."
-            }
-
-            try {
-              $response = Invoke-WebRequest `
-                -Uri "$baseUrl/" `
-                -TimeoutSec 5
-
-              if ($response.StatusCode -eq 200) {
-                $ready = $true
-                break
-              }
-            }
-            catch {
-              Write-Host "Esperando respuesta..."
-            }
-          }
-
-          if (-not $ready) {
-            if (Test-Path $log) {
-              Get-Content $log -Tail 80
-            }
-
-            throw "AssetRipper no inició el servidor."
-          }
-
-          Write-Host "Servidor iniciado correctamente."
-
-          Write-Host "Cargando archivos del juego..."
-
-          $loadResponse = Invoke-WebRequest `
-            -Uri "$baseUrl/LoadFolder" `
-            -Method POST `
-            -ContentType "application/x-www-form-urlencoded" `
-            -Body @{
-              Path = $env:GAMEDATA
-            } `
-            -TimeoutSec 3600
-
-          Write-Host "Carga completada. HTTP: $($loadResponse.StatusCode)"
-
-          Write-Host "Exportando proyecto Unity..."
-
-          $exportResponse = Invoke-WebRequest `
-            -Uri "$baseUrl/Export/UnityProject" `
-            -Method POST `
-            -ContentType "application/x-www-form-urlencoded" `
-            -Body @{
-              Path = $output
-            } `
-            -TimeoutSec 3600
-
-          Write-Host "Exportación completada. HTTP: $($exportResponse.StatusCode)"
-
-          $files = @(Get-ChildItem $output -File -Recurse)
-
-          if ($files.Count -eq 0) {
-            throw "AssetRipper no generó archivos."
-          }
-
-          Write-Host "Archivos exportados: $($files.Count)"
-
-          Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-
-      - name: Download Il2CppDumper
-        shell: pwsh
-        run: |
-          $release = Invoke-RestMethod `
-            -Uri "https://api.github.com/repos/Perfare/Il2CppDumper/releases/latest"
-
-          $asset = $release.assets |
-            Where-Object { $_.name -like "*.zip" } |
-            Select-Object -First 1
-
-          if (-not $asset) {
-            throw "No se encontró el ZIP de Il2CppDumper."
-          }
-
-          Write-Host "Descargando: $($asset.name)"
-
-          $zip = "$env:RUNNER_TEMP/Il2CppDumper.zip"
-          $destination = "$env:RUNNER_TEMP/Il2CppDumper"
-
-          Invoke-WebRequest `
-            -Uri $asset.browser_download_url `
-            -OutFile $zip
-
-          Expand-Archive `
-            -LiteralPath $zip `
-            -DestinationPath $destination `
-            -Force
-
-          $tool = Get-ChildItem $destination `
-            -Filter "Il2CppDumper.exe" `
-            -File -Recurse |
-            Select-Object -First 1
-
-          if (-not $tool) {
-            throw "No se encontró Il2CppDumper.exe."
-          }
-
-          "IL2CPPDUMPER=$($tool.FullName)" |
-            Out-File $env:GITHUB_ENV -Append
-
-          Write-Host "Il2CppDumper: $($tool.FullName)"
-
-      - name: Install .NET 6 Runtime
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '6.0.x'
-          dotnet-quality: 'ga'
-
-      - name: Verify .NET
-        shell: pwsh
-        run: |
-          dotnet --list-runtimes
-
-      - name: Analyze IL2CPP
-        shell: pwsh
-        run: |
-          $output = "$env:GITHUB_WORKSPACE/output/IL2CPP"
-
-          New-Item -ItemType Directory -Force -Path $output | Out-Null
-
-          Write-Host "Iniciando Il2CppDumper..."
-          Write-Host "Assembly: $env:ASSEMBLY"
-          Write-Host "Metadata: $env:METADATA"
-
-          $arguments = @(
-            "`"$env:ASSEMBLY`"",
-            "`"$env:METADATA`"",
-            "`"$output`""
-          )
-
-          $process = Start-Process `
-            -FilePath "$env:IL2CPPDUMPER" `
-            -ArgumentList $arguments `
-            -WorkingDirectory (Split-Path "$env:IL2CPPDUMPER") `
-            -NoNewWindow `
-            -PassThru `
-            -Wait
-
-          Write-Host "Código de salida: $($process.ExitCode)"
-
-          $files = @(Get-ChildItem $output -File -Recurse)
-
-          if ($files.Count -eq 0) {
-            throw "Il2CppDumper no generó archivos."
-          }
-
-          Write-Host "Il2CppDumper generó $($files.Count) archivos."
-
-      - name: Collect diagnostics
-        if: always()
-        shell: pwsh
-        run: |
-          $diagnostics = "$env:GITHUB_WORKSPACE/output/Diagnostics"
-
-          New-Item -ItemType Directory -Force -Path $diagnostics | Out-Null
-
-          $log = "$env:RUNNER_TEMP/AssetRipper.log"
-
-          if (Test-Path $log) {
-            Copy-Item $log "$diagnostics/AssetRipper.log" -Force
-            Write-Host "Log de AssetRipper guardado."
-          }
-
-      - name: Show generated files
-        if: always()
-        shell: pwsh
-        run: |
-          $output = "$env:GITHUB_WORKSPACE/output"
-
-          if (Test-Path $output) {
-            $files = @(Get-ChildItem $output -File -Recurse)
-
-            Write-Host "Total de archivos: $($files.Count)"
-
-            $files |
-              Select-Object FullName, Length |
-              Format-Table -AutoSize
-          }
-
-      - name: Upload extraction results
-        if: always()
+      - name: Upload decompiled files
         uses: actions/upload-artifact@v4
         with:
-          name: GrannyLegacy-Decompiled
-          path: output/
-          if-no-files-found: warn
-          compression-level: 6
+          name: granny-decompiled
+          path: out
+          if-no-files-found: error
           retention-days: 7
